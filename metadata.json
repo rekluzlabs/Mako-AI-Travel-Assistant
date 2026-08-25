@@ -1,0 +1,7 @@
+{
+  "name": "TravelBot & Offline Packing Assistant",
+  "description": "Extensible AI chatbot for travel planning, weather, and general knowledge with an offline-capable interactive packing list, document file record vault, camera photo capture for documents, medications, and companions, and emergency contact section.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
