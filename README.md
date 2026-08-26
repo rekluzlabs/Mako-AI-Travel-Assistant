@@ -1,6 +1,6 @@
-# MAKO Travel Assistant AI & Offline Packing Assistant
+# MAKO Travel AI & Offline Packing Assistant
 
-TravelBot & Offline Packing Assistant is an offline-first travel companion built with React, TypeScript, Tailwind CSS, and Google Gemini. It handles trip planning, packing, document storage, photo capture, and emergency medical profiles in one app.
+Mako Travel AI & Offline Packing Assistant is an offline-first travel companion built with React, TypeScript, Tailwind CSS, and Google Gemini. It handles trip planning, packing, document storage, photo capture, and emergency medical profiles in one app.
 
 ## 1. Packing List & Gear Manager
 
