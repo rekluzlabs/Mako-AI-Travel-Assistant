@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { VoiceRecorder } from 'capacitor-voice-recorder';
-import {
+import { 
   Send, 
   Sparkles, 
   WifiOff, 
@@ -21,11 +20,30 @@ import {
   FileText,
   X,
   Mic,
-  MicOff
+  MicOff,
+  Volume2,
+  VolumeX,
+  Sliders,
+  Square,
+  Radio,
+  Wifi
 } from 'lucide-react';
 import { ChatMessage, PackingItem, TripInfo, AddonModule, SuggestedAction, TravelDocument, DocumentCategory } from '../types';
 import { processOfflineMessage } from '../utils/offlineEngine';
 import { readFileAsDataURL, formatFileSize } from '../utils/fileVault';
+import { 
+  SpeechSettings, 
+  loadSpeechSettings, 
+  saveSpeechSettings, 
+  speakBotResponse, 
+  stopSpeaking, 
+  subscribeSpeakingState, 
+  SpeechToTextController,
+  WakeWordListener,
+  WakeWordResult,
+  getIsSpeaking
+} from '../utils/speech';
+import { VoiceSettingsModal } from './VoiceSettingsModal';
 
 interface ChatViewProps {
   messages: ChatMessage[];
@@ -60,17 +78,116 @@ export const ChatView: React.FC<ChatViewProps> = ({
 }) => {
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
   const [attachedFile, setAttachedFile] = useState<File | null>(null);
   const [attachedFileData, setAttachedFileData] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Speech Recognition & Text-to-Speech States
+  const [speechSettings, setSpeechSettings] = useState<SpeechSettings>(() => loadSpeechSettings());
+  const [showVoiceSettingsModal, setShowVoiceSettingsModal] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [interimSpeech, setInterimSpeech] = useState('');
+  const [speechError, setSpeechError] = useState<string | null>(null);
+  const [isBotSpeaking, setIsBotSpeaking] = useState(false);
+  const [currentSpeakingMsgId, setCurrentSpeakingMsgId] = useState<string | null>(null);
+  
+  // Wake Word ("OK Mako") states
+  const [isWakeWordActive, setIsWakeWordActive] = useState(false);
+  const [wakeWordNotification, setWakeWordNotification] = useState<string | null>(null);
+
+  const sttControllerRef = useRef<SpeechToTextController | null>(null);
+  const wakeWordListenerRef = useRef<WakeWordListener | null>(null);
+  const lastSpokenMessageIdRef = useRef<string | null>(null);
+
+  // Initialize Speech-to-Text & Wake Word controllers
+  useEffect(() => {
+    sttControllerRef.current = new SpeechToTextController();
+    wakeWordListenerRef.current = new WakeWordListener();
+    
+    // Subscribe to speaking state updates
+    const unsub = subscribeSpeakingState((speaking, msgId) => {
+      setIsBotSpeaking(speaking);
+      setCurrentSpeakingMsgId(msgId || null);
+    });
+
+    return () => {
+      unsub();
+      stopSpeaking();
+      sttControllerRef.current?.stopListening();
+      wakeWordListenerRef.current?.stop();
+    };
+  }, []);
+
+  // Save speech settings whenever changed
+  const handleUpdateSpeechSettings = (newSettings: SpeechSettings) => {
+    setSpeechSettings(newSettings);
+    saveSpeechSettings(newSettings);
+  };
+
   // Auto-scroll to bottom of chat
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isLoading]);
+  }, [messages, isLoading, interimSpeech]);
+
+  // Manage Wake Word Background Listener ("OK Mako")
+  useEffect(() => {
+    const listener = wakeWordListenerRef.current;
+    if (!listener || !listener.isSupported()) return;
+
+    if (speechSettings.enableWakeWord && !isListening && !isBotSpeaking && !isLoading) {
+      listener.start({
+        onWakeWordDetected: (result: WakeWordResult) => {
+          if (result.isFullPhrase && result.commandText.trim()) {
+            setWakeWordNotification(`⚡ "OK Mako" heard: "${result.commandText}"`);
+            setTimeout(() => setWakeWordNotification(null), 3000);
+            handleSendMessage(result.commandText.trim());
+          } else {
+            setWakeWordNotification(`✨ "OK Mako" activated! Listening for your request...`);
+            setTimeout(() => setWakeWordNotification(null), 3500);
+            // Open live voice dictation
+            startVoiceInput();
+          }
+        },
+        onStatusChange: (active) => {
+          setIsWakeWordActive(active);
+        },
+        onError: (err) => {
+          console.warn('Wake word error:', err);
+        }
+      });
+    } else {
+      listener.stop();
+      setIsWakeWordActive(false);
+    }
+
+    return () => {
+      listener.stop();
+    };
+  }, [speechSettings.enableWakeWord, isListening, isBotSpeaking, isLoading]);
+
+  // Auto-speak new assistant responses if autoSpeak is enabled
+  useEffect(() => {
+    if (!speechSettings.autoSpeak || messages.length === 0 || isLoading) return;
+
+    const lastMessage = messages[messages.length - 1];
+    if (lastMessage.role === 'assistant' && lastMessage.id !== lastSpokenMessageIdRef.current) {
+      lastSpokenMessageIdRef.current = lastMessage.id;
+      
+      speakBotResponse(lastMessage.content, {
+        messageId: lastMessage.id,
+        isOnline,
+        settings: speechSettings,
+        onEnd: () => {
+          // If hands-free continuous listening is enabled, auto-start listening
+          if (speechSettings.continuousListening) {
+            startVoiceInput();
+          }
+        }
+      });
+    }
+  }, [messages, isLoading, speechSettings.autoSpeak, speechSettings.continuousListening, isOnline]);
 
   const handleFileSelect = async (file: File) => {
     setAttachedFile(file);
@@ -82,7 +199,84 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
+  // Voice Input (Speech-to-Text) handler
+  const startVoiceInput = () => {
+    if (isListening) {
+      stopVoiceInput();
+      return;
+    }
+
+    setSpeechError(null);
+    setInterimSpeech('');
+    stopSpeaking();
+
+    const controller = sttControllerRef.current;
+    if (!controller || !controller.isSupported()) {
+      setSpeechError('Microphone speech recognition is not supported in this browser. Please use Chrome, Edge, or Safari.');
+      return;
+    }
+
+    const started = controller.startListening({
+      onStart: () => {
+        setIsListening(true);
+      },
+      onResult: (text: string, isFinal: boolean) => {
+        setInterimSpeech(text);
+        if (text) {
+          setInputValue(text);
+        }
+        if (isFinal && text.trim()) {
+          setIsListening(false);
+          // Focus input
+          inputRef.current?.focus();
+        }
+      },
+      onEnd: () => {
+        setIsListening(false);
+      },
+      onError: (err: string) => {
+        setIsListening(false);
+        if (err === 'not-allowed') {
+          setSpeechError('Microphone permission was denied. Please allow microphone access in your browser settings.');
+        } else if (err !== 'no-speech') {
+          setSpeechError(`Speech error: ${err}`);
+        }
+      }
+    });
+
+    if (!started) {
+      setIsListening(false);
+    }
+  };
+
+  const stopVoiceInput = () => {
+    sttControllerRef.current?.stopListening();
+    setIsListening(false);
+  };
+
+  // Toggle Text-to-Speech for a specific message
+  const handleToggleSpeakMessage = (msgId: string, content: string) => {
+    if (isBotSpeaking && currentSpeakingMsgId === msgId) {
+      stopSpeaking();
+      return;
+    }
+
+    speakBotResponse(content, {
+      messageId: msgId,
+      isOnline,
+      settings: speechSettings,
+      onEnd: () => {
+        if (speechSettings.continuousListening) {
+          startVoiceInput();
+        }
+      }
+    });
+  };
+
   const handleSendMessage = async (textToSend?: string) => {
+    stopSpeaking();
+    stopVoiceInput();
+
     const query = (textToSend || inputValue).trim();
     if ((!query && !attachedFile) || isLoading) return;
 
@@ -103,6 +297,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
     setMessages(prev => [...prev, userMessage]);
     setInputValue('');
+    setInterimSpeech('');
     const currentFile = attachedFile;
     const currentFileData = attachedFileData;
     setAttachedFile(null);
@@ -281,10 +476,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   const handleResetChat = () => {
+    stopSpeaking();
+    stopVoiceInput();
     const welcomeMsg: ChatMessage = {
       id: 'welcome-msg',
       role: 'assistant',
-      content: `Hello! I'm **TravelBot**, your AI travel companion and packing assistant.\n\nI can help you:\n• 🗺️ **Plan itineraries and activities** for ${tripInfo.destination}\n• 🌦️ **Recommend clothing & weather gear** based on climate\n• 🧳 **Track your packing list in real-time** (try typing *"Pack passport"* or *"Add sunscreen"*)\n• ✈️ **Check airport TSA security rules** (liquids, power banks, baggage)\n• 💡 **Answer general knowledge questions**\n\n*Everything you add to your packing list is safely stored on your device and works seamlessly offline!*`,
+      content: `Hello! I'm **TravelBot (Mako)**, your AI travel companion and packing assistant.\n\nI can help you:\n• 🎙️ **Wake Word Ready**: Just say **"OK Mako"** (pronounced *mak-oh*) anytime to talk to me hands-free!\n• 🔊 **Two-Way Voice**: Click the **Mic** button or turn on **Auto-Speak** for spoken responses\n• 🗺️ **Plan itineraries and activities** for ${tripInfo.destination}\n• 🌦️ **Recommend clothing & weather gear** based on climate\n• 🧳 **Track your packing list in real-time** (try saying *"OK Mako, pack passport"* or *"Add sunscreen"*)\n• ✈️ **Check airport TSA security rules** (liquids, power banks, baggage)\n\n*Everything works seamlessly both Online and Offline!*`,
       timestamp: Date.now(),
       suggestedActions: [
         { label: `Plan trip to ${tripInfo.destination}`, promptText: `Help me plan a 5-day itinerary for ${tripInfo.destination}` },
@@ -296,152 +493,279 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setMessages([welcomeMsg]);
   };
 
-  const handleStartRecording = async () => {
-    try {
-      const hasPermission = await VoiceRecorder.hasAudioRecordingPermission();
-      if (!hasPermission.value) {
-        const status = await VoiceRecorder.requestAudioRecordingPermission();
-        if (!status.value) return;
-      }
-      await VoiceRecorder.startRecording();
-      setIsRecording(true);
-    } catch (err) {
-      console.error('Failed to start recording', err);
-    }
-  };
-
-  const handleStopRecording = async () => {
-    try {
-      const result = await VoiceRecorder.stopRecording();
-      setIsRecording(false);
-      if (result.value && result.value.recordDataBase64) {
-        // Here you would send the audio to your AI
-        // For now, we'll just log it and show a message
-        console.log('Audio captured', result.value.mimeType);
-
-        const userMessage: ChatMessage = {
-          id: `msg-${Date.now()}-voice`,
-          role: 'user',
-          content: `🎤 *Voice message sent (${result.value.mimeType})*`,
-          timestamp: Date.now(),
-        };
-        setMessages(prev => [...prev, userMessage]);
-
-        // In a real app, you'd send base64 to your API:
-        // await handleSendVoice(result.value.recordDataBase64, result.value.mimeType);
-      }
-    } catch (err) {
-      console.error('Failed to stop recording', err);
-      setIsRecording(false);
-    }
-  };
-
   return (
     <div className="flex flex-col h-[calc(100vh-8.5rem)] max-w-5xl mx-auto bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
       
-      {/* Offline Alert Strip */}
-      {!isOnline && (
-        <div className="bg-amber-500/10 border-b border-amber-200 px-4 py-2 flex items-center justify-between text-xs text-amber-900 font-medium">
-          <div className="flex items-center gap-2">
-            <WifiOff className="w-4 h-4 text-amber-700 shrink-0" />
-            <span>
-              <strong>Offline Mode Active:</strong> You can add items, check off packing items, search offline travel rules, and manage your trip without internet.
+      {/* Audio Status & Offline Header Bar */}
+      <div className="bg-stone-50 border-b border-stone-200 px-3 sm:px-4 py-2 flex items-center justify-between gap-2 text-xs">
+        
+        {/* Left: Engine & Offline Indicator */}
+        <div className="flex items-center gap-2 min-w-0">
+          {!isOnline ? (
+            <div className="flex items-center gap-1.5 text-amber-900 font-semibold truncate">
+              <WifiOff className="w-4 h-4 text-amber-700 shrink-0" />
+              <span>Offline Mode (Device Speech & Local Storage)</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 text-stone-700 font-medium truncate">
+              <Sparkles className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+              <span>AI Companion Online</span>
+              <span className="text-[10px] text-stone-400 hidden sm:inline">•</span>
+              <span className="text-[11px] text-stone-500 hidden sm:inline">
+                Voice: {speechSettings.voiceType === 'gemini' ? `Gemini (${speechSettings.geminiVoice})` : 'Offline Device Voice'}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Right: Audio Control Actions */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          
+          {/* Active Speaking Indicator with Stop Button */}
+          {isBotSpeaking && (
+            <button
+              onClick={stopSpeaking}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 hover:bg-rose-100 font-semibold transition-colors cursor-pointer text-xs animate-pulse"
+              title="Stop Audio Playback"
+            >
+              <Square className="w-3 h-3 fill-rose-600" />
+              <span className="hidden xs:inline">Stop Speaking</span>
+            </button>
+          )}
+
+          {/* Quick "OK Mako" Wake Word Toggle Button */}
+          <button
+            id="wake-word-toggle-btn"
+            onClick={() => handleUpdateSpeechSettings({
+              ...speechSettings,
+              enableWakeWord: !speechSettings.enableWakeWord
+            })}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold transition-all cursor-pointer ${
+              speechSettings.enableWakeWord
+                ? isWakeWordActive
+                  ? 'bg-amber-100 border-amber-300 text-amber-950 ring-1 ring-amber-400/50'
+                  : 'bg-amber-50 border-amber-200 text-amber-900'
+                : 'bg-white border-stone-200 text-stone-500 hover:bg-stone-100'
+            }`}
+            title={speechSettings.enableWakeWord ? "Wake Word Active: Say 'OK Mako' (mak-oh) to talk hands-free" : "Wake Word Inactive: Click to enable hands-free 'OK Mako'"}
+          >
+            <span className="relative flex h-2 w-2">
+              {speechSettings.enableWakeWord && isWakeWordActive && (
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+              )}
+              <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                speechSettings.enableWakeWord ? 'bg-amber-600' : 'bg-stone-300'
+              }`}></span>
             </span>
+            <span className="font-bold">OK Mako</span>
+            <span className={`text-[10px] hidden sm:inline ${
+              speechSettings.enableWakeWord ? 'text-amber-800' : 'text-stone-400'
+            }`}>
+              {speechSettings.enableWakeWord ? 'ON' : 'OFF'}
+            </span>
+          </button>
+
+          {/* Quick Auto-Speak Toggle */}
+          <button
+            onClick={() => handleUpdateSpeechSettings({
+              ...speechSettings,
+              autoSpeak: !speechSettings.autoSpeak
+            })}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
+              speechSettings.autoSpeak
+                ? 'bg-amber-100/80 border-amber-300 text-amber-900'
+                : 'bg-white border-stone-200 text-stone-600 hover:bg-stone-100'
+            }`}
+            title={speechSettings.autoSpeak ? "Auto-Speak ON: Bot speaks responses" : "Auto-Speak OFF: Click to enable voice responses"}
+          >
+            {speechSettings.autoSpeak ? (
+              <>
+                <Volume2 className="w-3.5 h-3.5 text-amber-700" />
+                <span className="hidden sm:inline">Auto-Speak ON</span>
+              </>
+            ) : (
+              <>
+                <VolumeX className="w-3.5 h-3.5 text-stone-400" />
+                <span className="hidden sm:inline">Auto-Speak OFF</span>
+              </>
+            )}
+          </button>
+
+          {/* Voice Settings Button */}
+          <button
+            id="voice-settings-btn"
+            onClick={() => setShowVoiceSettingsModal(true)}
+            className="p-1.5 rounded-lg border border-stone-200 bg-white hover:bg-stone-100 text-stone-700 transition-colors cursor-pointer"
+            title="Voice & Speech Settings (Wake Word, Pitch, Speed, Persona)"
+          >
+            <Sliders className="w-3.5 h-3.5 text-stone-600" />
+          </button>
+        </div>
+      </div>
+
+      {/* Wake Word Trigger Alert Toast */}
+      {wakeWordNotification && (
+        <div className="bg-amber-500/15 border-b border-amber-300 px-4 py-2 text-xs text-amber-950 flex items-center justify-between animate-in fade-in slide-in-from-top-1 duration-200">
+          <div className="flex items-center gap-2 font-medium">
+            <Sparkles className="w-4 h-4 text-amber-700 shrink-0 animate-spin" />
+            <span>{wakeWordNotification}</span>
           </div>
-          <span className="text-[11px] bg-amber-200/70 text-amber-900 px-2 py-0.5 rounded-full font-mono">
-            Local Storage
-          </span>
+          <button
+            onClick={() => setWakeWordNotification(null)}
+            className="p-0.5 text-amber-800 hover:text-amber-950 rounded cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Speech Error Banner */}
+      {speechError && (
+        <div className="bg-rose-50 border-b border-rose-200 px-4 py-2 text-xs text-rose-800 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{speechError}</span>
+          </div>
+          <button
+            onClick={() => setSpeechError(null)}
+            className="p-0.5 text-rose-600 hover:text-rose-900 rounded"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 
       {/* Chat Messages List */}
       <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
-        {messages.map((msg) => (
-          <div
-            key={msg.id}
-            className={`flex items-start gap-3 ${
-              msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'
-            }`}
-          >
-            {/* Avatar */}
+        {messages.map((msg) => {
+          const isCurrentlySpeakingThis = isBotSpeaking && currentSpeakingMsgId === msg.id;
+
+          return (
             <div
-              className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-white text-xs ${
-                msg.role === 'user'
-                  ? 'bg-stone-800'
-                  : msg.isOfflineGenerated
-                  ? 'bg-amber-700'
-                  : 'bg-gradient-to-tr from-amber-600 to-amber-500'
+              key={msg.id}
+              className={`flex items-start gap-3 ${
+                msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'
               }`}
             >
-              {msg.role === 'user' ? (
-                <User className="w-4 h-4" />
-              ) : (
-                <Bot className="w-4 h-4" />
-              )}
-            </div>
-
-            {/* Message Bubble */}
-            <div
-              className={`max-w-[85%] sm:max-w-[75%] rounded-2xl p-4 text-sm leading-relaxed transition-all ${
-                msg.role === 'user'
-                  ? 'bg-stone-900 text-stone-100 rounded-tr-xs'
-                  : 'bg-stone-100/90 text-stone-800 border border-stone-200/80 rounded-tl-xs'
-              }`}
-            >
-              {/* Applied Packing Action Notification Pill */}
-              {msg.packingActionsApplied && msg.packingActionsApplied.map((action, idx) => (
-                <div 
-                  key={idx} 
-                  className="mb-3 flex items-center gap-2 bg-emerald-50 text-emerald-800 border border-emerald-200 px-3 py-1.5 rounded-lg text-xs font-medium"
-                >
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>{action.summary}</span>
-                </div>
-              ))}
-
-              {/* Offline badge inside message */}
-              {msg.isOfflineGenerated && (
-                <div className="mb-2 inline-flex items-center gap-1 text-[11px] font-medium bg-amber-100 text-amber-800 px-2 py-0.5 rounded-md">
-                  <WifiOff className="w-3 h-3" />
-                  <span>Offline Local Response</span>
-                </div>
-              )}
-
-              {/* Message Markdown Content */}
-              <div className="prose prose-stone prose-sm max-w-none break-words dark:prose-invert">
-                <ReactMarkdown
-                  components={{
-                    p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
-                    ul: ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
-                    ol: ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
-                    li: ({ children }) => <li className="mb-0.5">{children}</li>,
-                    strong: ({ children }) => <strong className="font-semibold text-stone-900">{children}</strong>,
-                    h3: ({ children }) => <h3 className="font-semibold text-base mt-3 mb-1 text-stone-900">{children}</h3>,
-                    h4: ({ children }) => <h4 className="font-semibold text-sm mt-2 mb-1 text-stone-900">{children}</h4>,
-                  }}
-                >
-                  {msg.content}
-                </ReactMarkdown>
+              {/* Avatar */}
+              <div
+                className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-white text-xs ${
+                  msg.role === 'user'
+                    ? 'bg-stone-800'
+                    : isCurrentlySpeakingThis
+                    ? 'bg-amber-600 ring-2 ring-amber-400 ring-offset-2 animate-pulse'
+                    : msg.isOfflineGenerated
+                    ? 'bg-amber-700'
+                    : 'bg-gradient-to-tr from-amber-600 to-amber-500'
+                }`}
+              >
+                {msg.role === 'user' ? (
+                  <User className="w-4 h-4" />
+                ) : (
+                  <Bot className="w-4 h-4" />
+                )}
               </div>
 
-              {/* Suggested Action Chips */}
-              {msg.suggestedActions && msg.suggestedActions.length > 0 && (
-                <div className="mt-3 pt-3 border-t border-stone-200/60 flex flex-wrap gap-1.5">
-                  {msg.suggestedActions.map((action, idx) => (
+              {/* Message Bubble */}
+              <div
+                className={`max-w-[85%] sm:max-w-[75%] rounded-2xl p-4 text-sm leading-relaxed transition-all relative group ${
+                  msg.role === 'user'
+                    ? 'bg-stone-900 text-stone-100 rounded-tr-xs'
+                    : isCurrentlySpeakingThis
+                    ? 'bg-amber-50/90 text-stone-900 border-2 border-amber-400 rounded-tl-xs shadow-sm'
+                    : 'bg-stone-100/90 text-stone-800 border border-stone-200/80 rounded-tl-xs'
+                }`}
+              >
+                {/* Applied Packing Action Notification Pill */}
+                {msg.packingActionsApplied && msg.packingActionsApplied.map((action, idx) => (
+                  <div 
+                    key={idx} 
+                    className="mb-3 flex items-center gap-2 bg-emerald-50 text-emerald-800 border border-emerald-200 px-3 py-1.5 rounded-lg text-xs font-medium"
+                  >
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>{action.summary}</span>
+                  </div>
+                ))}
+
+                {/* Badges Bar for Assistant message */}
+                {msg.role === 'assistant' && (
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5">
+                      {msg.isOfflineGenerated && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-medium bg-amber-100 text-amber-800 px-2 py-0.5 rounded-md">
+                          <WifiOff className="w-3 h-3" />
+                          <span>Offline Response</span>
+                        </span>
+                      )}
+                      {isCurrentlySpeakingThis && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold bg-amber-200 text-amber-900 px-2 py-0.5 rounded-md animate-pulse">
+                          <Volume2 className="w-3 h-3" />
+                          <span>Speaking aloud...</span>
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Per-Message Speak / Read Aloud Button */}
                     <button
-                      key={idx}
-                      onClick={() => handleSendMessage(action.promptText)}
-                      className="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-md bg-white border border-stone-300 text-stone-700 hover:bg-amber-50 hover:border-amber-300 hover:text-amber-900 transition-colors font-medium cursor-pointer text-left"
+                      onClick={() => handleToggleSpeakMessage(msg.id, msg.content)}
+                      className={`p-1.5 rounded-lg transition-colors cursor-pointer flex items-center gap-1 text-xs font-medium ${
+                        isCurrentlySpeakingThis
+                          ? 'bg-rose-100 text-rose-700 hover:bg-rose-200'
+                          : 'text-stone-500 hover:text-stone-900 hover:bg-stone-200/70'
+                      }`}
+                      title={isCurrentlySpeakingThis ? "Stop speaking this message" : "Listen / Speak this message aloud"}
                     >
-                      <span>{action.label}</span>
-                      <ArrowRight className="w-3 h-3 opacity-60" />
+                      {isCurrentlySpeakingThis ? (
+                        <>
+                          <Square className="w-3.5 h-3.5 fill-rose-600 text-rose-600" />
+                          <span className="text-[11px] font-bold">Stop</span>
+                        </>
+                      ) : (
+                        <>
+                          <Volume2 className="w-3.5 h-3.5" />
+                          <span className="text-[11px] hidden xs:inline">Speak</span>
+                        </>
+                      )}
                     </button>
-                  ))}
+                  </div>
+                )}
+
+                {/* Message Markdown Content */}
+                <div className="prose prose-stone prose-sm max-w-none break-words dark:prose-invert">
+                  <ReactMarkdown
+                    components={{
+                      p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                      ul: ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
+                      ol: ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
+                      li: ({ children }) => <li className="mb-0.5">{children}</li>,
+                      strong: ({ children }) => <strong className="font-semibold text-stone-900">{children}</strong>,
+                      h3: ({ children }) => <h3 className="font-semibold text-base mt-3 mb-1 text-stone-900">{children}</h3>,
+                      h4: ({ children }) => <h4 className="font-semibold text-sm mt-2 mb-1 text-stone-900">{children}</h4>,
+                    }}
+                  >
+                    {msg.content}
+                  </ReactMarkdown>
                 </div>
-              )}
+
+                {/* Suggested Action Chips */}
+                {msg.suggestedActions && msg.suggestedActions.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-stone-200/60 flex flex-wrap gap-1.5">
+                    {msg.suggestedActions.map((action, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => handleSendMessage(action.promptText)}
+                        className="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-md bg-white border border-stone-300 text-stone-700 hover:bg-amber-50 hover:border-amber-300 hover:text-amber-900 transition-colors font-medium cursor-pointer text-left"
+                      >
+                        <span>{action.label}</span>
+                        <ArrowRight className="w-3 h-3 opacity-60" />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
 
         {/* Loading Indicator */}
         {isLoading && (
@@ -461,6 +785,47 @@ export const ChatView: React.FC<ChatViewProps> = ({
         )}
         <div ref={messagesEndRef} />
       </div>
+
+      {/* Live Voice Dictation Active Bar */}
+      {isListening && (
+        <div className="bg-rose-500/10 border-t border-rose-300 px-4 py-3 flex items-center justify-between gap-3 animate-in fade-in duration-150">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            <div className="relative flex items-center justify-center w-8 h-8 rounded-full bg-rose-600 text-white shrink-0">
+              <Mic className="w-4 h-4 animate-pulse" />
+              <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-rose-500"></span>
+              </span>
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-bold text-rose-900 flex items-center gap-1.5">
+                <span>Listening to your voice... (Speak now)</span>
+              </div>
+              <p className="text-xs text-rose-800 font-medium truncate mt-0.5">
+                {interimSpeech ? `"${interimSpeech}"` : 'Say "Pack sunglasses", "What do I need?", "TSA rules"...'}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={stopVoiceInput}
+              className="px-3 py-1.5 rounded-lg bg-white border border-rose-300 hover:bg-rose-50 text-rose-800 text-xs font-semibold transition-colors cursor-pointer"
+            >
+              Done Speaking
+            </button>
+            {interimSpeech && (
+              <button
+                type="button"
+                onClick={() => handleSendMessage(interimSpeech)}
+                className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition-colors cursor-pointer shadow-xs"
+              >
+                Send Voice
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Quick Action Bar */}
       <div className="bg-stone-50 border-t border-stone-200/80 px-4 py-2 flex items-center gap-2 overflow-x-auto no-scrollbar">
@@ -566,6 +931,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <Paperclip className="w-4 h-4" />
           </button>
 
+          {/* Voice Input Microphone Button */}
+          <button
+            id="chat-voice-input-btn"
+            type="button"
+            onClick={startVoiceInput}
+            className={`h-11 w-11 rounded-xl border flex items-center justify-center transition-all shrink-0 cursor-pointer ${
+              isListening
+                ? 'bg-rose-600 border-rose-600 text-white animate-pulse ring-2 ring-rose-400 ring-offset-1'
+                : 'border-stone-300 bg-stone-50 hover:bg-rose-50 text-stone-600 hover:text-rose-700 hover:border-rose-300'
+            }`}
+            title={isListening ? "Listening... click to stop" : "Speak to TravelBot (Voice Input STT)"}
+          >
+            {isListening ? (
+              <MicOff className="w-4 h-4" />
+            ) : (
+              <Mic className="w-4 h-4" />
+            )}
+          </button>
+
           <div className="relative flex-1">
             <textarea
               ref={inputRef}
@@ -575,24 +959,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={
-                isOnline
-                  ? `Ask travel questions, weather advice, or attach documents/tickets...`
-                  : `Offline Mode: Type "Pack passport", "Add 3 socks", "What is missing?", "TSA rules"...`
+                isListening
+                  ? "Listening to your voice..."
+                  : speechSettings.enableWakeWord
+                  ? `Say "OK Mako", click Mic, or type your packing/travel request...`
+                  : isOnline
+                  ? `Ask travel questions, click Mic to speak, or attach tickets...`
+                  : `Offline Mode: Speak or type "Pack passport", "What is missing?", "TSA rules"...`
               }
-              className="w-full resize-none rounded-xl border border-stone-300 bg-stone-50 pl-3.5 pr-10 py-2.5 text-sm text-stone-900 placeholder:text-stone-400 focus:bg-white focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 focus:outline-none transition-all max-h-32 min-h-[44px]"
-            />
-            <button
-              type="button"
-              onClick={isRecording ? handleStopRecording : handleStartRecording}
-              className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg transition-colors ${
-                isRecording
-                  ? 'bg-red-100 text-red-600 animate-pulse'
-                  : 'text-stone-400 hover:text-amber-600 hover:bg-stone-100'
+              className={`w-full resize-none rounded-xl border px-3.5 py-2.5 text-sm text-stone-900 placeholder:text-stone-400 focus:bg-white focus:outline-none transition-all max-h-32 min-h-[44px] ${
+                isListening
+                  ? 'border-rose-400 bg-rose-50/40 ring-2 ring-rose-500/20'
+                  : 'border-stone-300 bg-stone-50 focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20'
               }`}
-              title={isRecording ? "Stop recording" : "Voice input"}
-            >
-              {isRecording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-            </button>
+            />
           </div>
 
           <button
@@ -605,20 +985,53 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <Send className="w-4 h-4" />
           </button>
         </form>
+
         <div className="mt-1.5 text-[11px] text-stone-600 flex items-center justify-between">
-          <span>Press <strong>Enter</strong> to send • Attach PDF/images/tickets</span>
-          {onOpenVaultTab && (
-            <button 
-              type="button" 
-              onClick={onOpenVaultTab}
-              className="text-amber-800 font-medium hover:underline flex items-center gap-1"
+          <span className="flex items-center gap-2">
+            <span>Press <strong>Enter</strong> to send</span>
+            <span>•</span>
+            <button
+              type="button"
+              onClick={startVoiceInput}
+              className="text-amber-800 hover:text-amber-950 font-semibold inline-flex items-center gap-1 hover:underline"
             >
-              <FileText className="w-3 h-3" />
-              <span>Open Document Vault</span>
+              <Mic className="w-3 h-3 text-rose-600" />
+              <span>{isListening ? "Listening..." : "Speak via Mic"}</span>
             </button>
-          )}
+          </span>
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setShowVoiceSettingsModal(true)}
+              className="text-stone-600 hover:text-stone-900 font-medium flex items-center gap-1 hover:underline"
+            >
+              <Sliders className="w-3 h-3 text-stone-500" />
+              <span>Voice Settings</span>
+            </button>
+            {onOpenVaultTab && (
+              <button 
+                type="button" 
+                onClick={onOpenVaultTab}
+                className="text-amber-800 font-medium hover:underline flex items-center gap-1"
+              >
+                <FileText className="w-3 h-3" />
+                <span className="hidden sm:inline">Document Vault</span>
+              </button>
+            )}
+          </div>
         </div>
       </div>
+
+      {/* Voice & Speech Settings Modal */}
+      <VoiceSettingsModal
+        isOpen={showVoiceSettingsModal}
+        onClose={() => setShowVoiceSettingsModal(false)}
+        settings={speechSettings}
+        onSaveSettings={handleUpdateSpeechSettings}
+        isOnline={isOnline}
+      />
     </div>
   );
 };
+

@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
-import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
+import { GoogleGenAI, Type, FunctionDeclaration, Modality } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 
 dotenv.config();
@@ -504,6 +504,65 @@ Return a structured JSON with:
         { name: "Printed / Offline Booking Copy", category: "documents", quantity: 1, priority: "essential", luggageType: "personal", notes: "Backup record" },
         { name: "Valid Passport & ID", category: "documents", quantity: 1, priority: "essential", luggageType: "personal", notes: "Original documents" }
       ]
+    });
+  }
+});
+
+// AI Text-to-Speech (TTS) Endpoint
+app.post("/api/tts", async (req, res) => {
+  try {
+    const { text, voiceName = "Kore" } = req.body;
+    if (!text || typeof text !== "string") {
+      return res.status(400).json({ error: "Text parameter is required" });
+    }
+
+    // Clean text: strip markdown symbols, code blocks, URLs, and excessive whitespace
+    const cleanText = text
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1")
+      .replace(/[*#_~>]/g, "")
+      .replace(/•/g, "")
+      .replace(/https?:\/\/\S+/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 1500);
+
+    if (!cleanText) {
+      return res.json({ audioData: null, mimeType: null });
+    }
+
+    const ai = getAIClient();
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-flash-tts-preview",
+      contents: [{ parts: [{ text: cleanText }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: {
+            // 'Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'
+            prebuiltVoiceConfig: { voiceName: voiceName || "Kore" },
+          },
+        },
+      },
+    });
+
+    const part = response.candidates?.[0]?.content?.parts?.[0];
+    const base64Audio = part?.inlineData?.data || null;
+    const mimeType = part?.inlineData?.mimeType || "audio/wav";
+
+    res.json({
+      audioData: base64Audio,
+      mimeType,
+      cleanText,
+    });
+  } catch (error: any) {
+    console.warn("TTS generation error in /api/tts:", error?.message || error);
+    res.status(200).json({
+      audioData: null,
+      mimeType: null,
+      fallback: true,
+      error: error?.message || "Cloud TTS unavailable",
     });
   }
 });
