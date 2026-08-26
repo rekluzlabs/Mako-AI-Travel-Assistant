@@ -67,3 +67,39 @@ Toggle these on or off in the Addons Manager:
 - **Budget & Currency Tracker:** Cost estimation and spending notes.
 - **Weather Advisory Alerts:** Destination weather forecasts.
 - **Multi-Bag Weight Optimizer:** Baggage scale calculations to avoid excess fees.
+
+## Software & Technology Used
+
+This repo contains two versions of the app, built with different approaches.
+
+### Version 1: Web App (React + TypeScript)
+
+**Frontend**
+- React 19 & TypeScript — component-driven UI architecture with full type safety
+- Vite — build tool and development server
+- Tailwind CSS (`@tailwindcss/vite`) — utility-first styling for responsive layouts
+- Lucide React — iconography
+- Canvas-Confetti — reward animations on completed packing lists
+
+**Backend & Server**
+- Node.js with Express — server-side API endpoints (`/api/*`) for AI chat completions, document processing, and proxying
+- `@google/genai` (Gemini 2.5 Flash) — itinerary generation, vision scanning for tickets/vouchers, multimodal document analysis
+
+**Offline & Storage**
+- IndexedDB (`idb-keyval`) & LocalStorage — client-side storage for packing lists, scanned documents, and emergency contacts
+- Web Speech API & Web Audio API — browser-native voice recognition, "OK Mako" wake-word detection, and text-to-speech feedback
+
+> Note: voice recognition relies on the Web Speech API, which is Chrome/Chromium-only — it does not work in Firefox. This applies to both versions below, since they share the same React frontend.
+
+### Version 2: Android Studio Build (Capacitor + Native Android Integration)
+
+Based on the Capacitor project structure, build configurations, and native plugins, the Android Studio environment for this application integrates the following software components, libraries, and frameworks alongside the React frontend above:
+
+- **Capacitor Core & Android Bridge** (`@capacitor/core`, `@capacitor/android`) — provides the native runtime container and JavaScript-to-Native bridge that connects the React web frontend to the underlying Android OS
+- **Capacitor Plugins:**
+  - `capacitor-voice-recorder` — handles native Android microphone access and audio recording for the AI voice companion
+  - `@capacitor/dialog` — triggers native Android system alert dialogs and prompts from JavaScript
+  - `@capacitor/assets` — command-line asset tool used to downscale, crop, and generate multi-density launcher icons and splash screen image assets (`mdpi` through `xxxhdpi`)
+- **Android Gradle Plugin (AGP) & Gradle** — the native build automation system used inside Android Studio to compile Java/Kotlin sources, package web assets from `assets/public`, manage dependencies, and output signed `.apk` / `.aab` binaries
+- **ProGuard / R8** — code shrinking, obfuscation, and optimization engine used during the release build phase to process native code dependencies and optimize binary file size
+- **Android SDK & AndroidX Libraries** — modern native Android platform APIs, support libraries, and activity contracts used by Capacitor to run the native `WebView` host inside `MainActivity`
