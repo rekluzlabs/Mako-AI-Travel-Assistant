@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { 
+import { VoiceRecorder } from 'capacitor-voice-recorder';
+import {
   Send, 
   Sparkles, 
   WifiOff, 
@@ -18,7 +19,9 @@ import {
   AlertCircle,
   Paperclip,
   FileText,
-  X
+  X,
+  Mic,
+  MicOff
 } from 'lucide-react';
 import { ChatMessage, PackingItem, TripInfo, AddonModule, SuggestedAction, TravelDocument, DocumentCategory } from '../types';
 import { processOfflineMessage } from '../utils/offlineEngine';
@@ -57,6 +60,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 }) => {
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
   const [attachedFile, setAttachedFile] = useState<File | null>(null);
   const [attachedFileData, setAttachedFileData] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -290,6 +294,46 @@ export const ChatView: React.FC<ChatViewProps> = ({
       ]
     };
     setMessages([welcomeMsg]);
+  };
+
+  const handleStartRecording = async () => {
+    try {
+      const hasPermission = await VoiceRecorder.hasAudioRecordingPermission();
+      if (!hasPermission.value) {
+        const status = await VoiceRecorder.requestAudioRecordingPermission();
+        if (!status.value) return;
+      }
+      await VoiceRecorder.startRecording();
+      setIsRecording(true);
+    } catch (err) {
+      console.error('Failed to start recording', err);
+    }
+  };
+
+  const handleStopRecording = async () => {
+    try {
+      const result = await VoiceRecorder.stopRecording();
+      setIsRecording(false);
+      if (result.value && result.value.recordDataBase64) {
+        // Here you would send the audio to your AI
+        // For now, we'll just log it and show a message
+        console.log('Audio captured', result.value.mimeType);
+
+        const userMessage: ChatMessage = {
+          id: `msg-${Date.now()}-voice`,
+          role: 'user',
+          content: `🎤 *Voice message sent (${result.value.mimeType})*`,
+          timestamp: Date.now(),
+        };
+        setMessages(prev => [...prev, userMessage]);
+
+        // In a real app, you'd send base64 to your API:
+        // await handleSendVoice(result.value.recordDataBase64, result.value.mimeType);
+      }
+    } catch (err) {
+      console.error('Failed to stop recording', err);
+      setIsRecording(false);
+    }
   };
 
   return (
@@ -535,8 +579,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   ? `Ask travel questions, weather advice, or attach documents/tickets...`
                   : `Offline Mode: Type "Pack passport", "Add 3 socks", "What is missing?", "TSA rules"...`
               }
-              className="w-full resize-none rounded-xl border border-stone-300 bg-stone-50 px-3.5 py-2.5 text-sm text-stone-900 placeholder:text-stone-400 focus:bg-white focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 focus:outline-none transition-all max-h-32 min-h-[44px]"
+              className="w-full resize-none rounded-xl border border-stone-300 bg-stone-50 pl-3.5 pr-10 py-2.5 text-sm text-stone-900 placeholder:text-stone-400 focus:bg-white focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 focus:outline-none transition-all max-h-32 min-h-[44px]"
             />
+            <button
+              type="button"
+              onClick={isRecording ? handleStopRecording : handleStartRecording}
+              className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg transition-colors ${
+                isRecording
+                  ? 'bg-red-100 text-red-600 animate-pulse'
+                  : 'text-stone-400 hover:text-amber-600 hover:bg-stone-100'
+              }`}
+              title={isRecording ? "Stop recording" : "Voice input"}
+            >
+              {isRecording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            </button>
           </div>
 
           <button
