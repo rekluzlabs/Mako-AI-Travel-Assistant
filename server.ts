@@ -181,7 +181,7 @@ app.post("/api/chat", async (req, res) => {
       ? enabledAddons.map((a: any) => `• Addon "${a.name}": ${a.promptContribution || a.description}`).join("\n")
       : "General Travel & Packing Assistant active.";
 
-    const systemInstruction = `You are "TravelBot", an intelligent, highly versatile travel companion and general knowledge assistant.
+    const systemInstruction = `You are "Mako" (Mako Travel), an intelligent, highly versatile travel companion, smart packing advisor, and itinerary planner.
 You specialize in:
 1. Travel planning, destinations, itineraries, culture, safety, food, and logistics.
 2. Accurate weather forecasts and seasonal packing guidance.
@@ -584,7 +584,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`TravelBot Server running at http://0.0.0.0:${PORT}`);
+    console.log(`Mako Travel Server running at http://0.0.0.0:${PORT}`);
   });
 }
 

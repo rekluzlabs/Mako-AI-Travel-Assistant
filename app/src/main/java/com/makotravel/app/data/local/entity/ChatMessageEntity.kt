@@ -1,0 +1,13 @@
+package com.makotravel.app.data.local.entity
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+@Entity(tableName = "chat_messages")
+data class ChatMessageEntity(
+    @PrimaryKey val id: String,
+    val role: String, // "user", "assistant", "system"
+    val content: String,
+    val timestamp: Long = System.currentTimeMillis(),
+    val suggestionsJson: String = "" // JSON list of quick action prompts
+)

@@ -64,7 +64,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="font-semibold text-base sm:text-lg text-stone-900 tracking-tight flex items-center gap-1.5">
-                  TravelBot
+                  Mako Travel
                 </h1>
                 <span className="hidden sm:inline-block text-[11px] font-medium bg-amber-50 text-amber-800 border border-amber-200/80 px-2 py-0.5 rounded-full">
                   Offline Ready
